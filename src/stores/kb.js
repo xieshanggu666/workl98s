@@ -5,6 +5,7 @@ import { uid } from '@/utils/format'
 import { ensureVersions, mergeDocFields } from '@/utils/version'
 import { buildTimelineEntry } from '@/utils/review'
 import { GAP } from '@/utils/gap'
+import { isGrantActive, ACCESS_PERM } from '@/utils/access'
 import { useAuthStore } from './auth'
 import { useGapStore } from './gap'
 
@@ -78,13 +79,24 @@ export const useKbStore = defineStore('kb', () => {
     const savedBy = currentUser?.id || 'u-guest'
     let result = null
     // 读 + 写放在同一事务中，保证「检测版本 → 合并 → 追加版本记录」不被其他窗口的写入打断
-    await db.transaction('rw', db.docs, async () => {
+    await db.transaction('rw', db.docs, db.accessRequests, async () => {
       const existing = await db.docs.get(id)
       if (!existing) { result = { status: 'missing' }; return }
       // 评审中锁定：仅管理员可直接写入（管理员写入通道为审批，这里兜底防御多窗口/共享链接绕过）
       if (existing.activeReviewId && savedBy !== 'u-guest') {
         const isAdmin = currentUser?.role === 'admin'
         if (!isAdmin) { result = { status: 'review-locked', latest: existing }; return }
+      }
+      // 非拥有者/非固定协作成员（如只读角色）写入：必须持有效限时协作授权，否则拒绝。
+      // 防止仅前端放开编辑入口被多窗口/直接调用绕过；授权撤销或到期后保存立即收回
+      const isOwnerOrEditor = existing.ownerId === savedBy || (existing.editors || []).includes(savedBy)
+      const isContentRole = currentUser?.role === 'admin' || currentUser?.role === 'editor'
+      if (!isOwnerOrEditor && !isContentRole && savedBy !== 'u-guest') {
+        const grantReq = await db.accessRequests
+          .where('docId').equals(id)
+          .filter((r) => r.applicantId === savedBy).toArray()
+        const collab = grantReq.find((r) => isGrantActive(r) && r.grant?.permission === ACCESS_PERM.COLLAB)
+        if (!collab) { result = { status: 'access-denied', latest: existing }; return }
       }
       // 兼容已有文档：缺失的版本记录先补全，再在其后追加，历史版本永不丢弃
       const versions = ensureVersions(existing, now)
@@ -135,6 +147,8 @@ export const useKbStore = defineStore('kb', () => {
     await db.shares.where('docId').equals(id).delete()
     // 评审单随文档一并清理（直接按索引删除，避免与 review store 循环依赖）
     await db.reviews.where('docId').equals(id).delete()
+    // 访问申请/授权随文档一并清理（授权失去依附对象，详情、搜索、问答、编辑入口同步消失）
+    await db.accessRequests.where('docId').equals(id).delete()
     // 关联该文档的缺口工单退回处理中：答案来源/送审关联随文档删除失效，需重新关联
     const now = new Date().toISOString()
     const linkedTickets = await db.gapTickets.where('docId').equals(id).toArray()

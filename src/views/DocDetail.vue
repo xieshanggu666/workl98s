@@ -5,13 +5,17 @@ import { useKbStore } from '@/stores/kb'
 import { useAuthStore } from '@/stores/auth'
 import { useEngagementStore } from '@/stores/engagement'
 import { useReviewStore } from '@/stores/review'
+import { useAccessStore } from '@/stores/access'
 import DocPill from '@/components/common/DocPill.vue'
 import MemberSelect from '@/components/common/MemberSelect.vue'
 import ShareDialog from '@/components/doc/ShareDialog.vue'
 import ReviewPanel from '@/components/doc/ReviewPanel.vue'
+import AccessApplyCard from '@/components/doc/AccessApplyCard.vue'
+import AccessPanel from '@/components/doc/AccessPanel.vue'
 import { formatFull, formatDate, avatarColor } from '@/utils/format'
 import { canEditDoc, canViewDoc } from '@/utils/permission'
 import { versionReviewBadge } from '@/utils/review'
+import { ACCESS, accessPermLabel, grantExpireText } from '@/utils/access'
 
 const route = useRoute()
 const router = useRouter()
@@ -19,10 +23,10 @@ const kb = useKbStore()
 const auth = useAuthStore()
 const engagement = useEngagementStore()
 const reviewStore = useReviewStore()
+const accessStore = useAccessStore()
 
 const doc = ref(null)
 const notFound = ref(false)
-const notAllowed = ref(false)
 const commentText = ref('')
 const commentMentions = ref([])
 const showVersions = ref(false)
@@ -38,22 +42,32 @@ const versionList = computed(() => (doc.value?.versions?.length ? doc.value.vers
 
 async function refresh() {
   if (!docId.value) return
-  await reviewStore.loadAll()
+  await Promise.all([reviewStore.loadAll(), accessStore.loadAll()])
   const d = await kb.getDoc(docId.value)
-  if (!d) { notFound.value = true; return }
-  if (!canViewDoc(d, auth.user?.id)) { notAllowed.value = true; return }
+  if (!d) { notFound.value = true; doc.value = null; return }
+  notFound.value = false
+  // 受限文档仍保留引用：能否查看由 hasAccess 响应式判定——
+  // 授权被撤销/到期时 store 变化会即时切到「访问申请」卡片，无需刷新
   doc.value = d
-  await engagement.recordView(auth.user?.id, d.id)
-  await engagement.refresh(auth.user?.id)
+  if (hasViewAccess.value) {
+    await engagement.recordView(auth.user?.id, d.id)
+    await engagement.refresh(auth.user?.id)
+  }
 }
 
-const canEdit = computed(() => canEditDoc(auth.user?.role, doc.value, auth.user?.id, pendingReview.value))
+// 当前用户在该文档上的有效限时授权（阅读/协作）
+const activeGrant = computed(() => (doc.value ? accessStore.grantOf(doc.value.id, auth.user?.id) : null))
+// 是否可查看详情（随授权记录响应式变化：撤销/到期即时收回）
+const hasViewAccess = computed(() => doc.value ? canViewDoc(doc.value, auth.user?.id, null, activeGrant.value) : false)
+const canEdit = computed(() => canEditDoc(auth.user?.role, doc.value, auth.user?.id, pendingReview.value, activeGrant.value))
 const isFav = computed(() => engagement.isFavorite(docId.value))
 const comments = computed(() => (doc.value ? kb.commentsOf(doc.value.id) : []))
 const userById = computed(() => Object.fromEntries(auth.users.map((u) => [u.id, u])))
 const pendingReview = computed(() => (doc.value ? reviewStore.pendingReviewOf(doc.value.id) : null))
 // 文档锁定提示：评审中正文保持旧版，编辑入口（非管理员）不可用
 const reviewLocked = computed(() => !!pendingReview.value && auth.user?.role !== 'admin')
+// 拥有者视角：管理本文档的访问申请
+const isOwnerOrAdmin = computed(() => doc.value && (auth.user?.role === 'admin' || doc.value.ownerId === auth.user?.id))
 
 async function doDelete() {
   if (!confirm('确定删除该文档？此操作不可恢复。')) return
@@ -89,7 +103,9 @@ watch(docId, () => { if (route.name === 'docDetail') { refresh(); showVersions.v
 <template>
   <div class="detail">
     <div v-if="notFound" class="empty"><div class="ico">❔</div>文档不存在或已被删除</div>
-    <div v-else-if="notAllowed" class="empty"><div class="ico">🔒</div>该文档为私有，你没有查看权限</div>
+
+    <!-- 受限文档：可申请限时阅读/协作权限，由拥有者审批并生成授权记录；撤销/到期即时回到此卡片 -->
+    <AccessApplyCard v-else-if="doc && !hasViewAccess" :doc="doc" />
 
     <template v-else-if="doc">
       <div v-if="mergeNotice" class="card merge-note">
@@ -102,6 +118,9 @@ watch(docId, () => { if (route.name === 'docDetail') { refresh(); showVersions.v
       </div>
       <div v-if="reviewLocked" class="card review-lock">
         <span>⏳ 该文档正在评审中（{{ userById[pendingReview.submittedBy]?.name }} 发起）：当前展示的是评审前版本，正文已锁定，审批通过后更新。</span>
+      </div>
+      <div v-if="activeGrant" class="card grant-banner">
+        <span>🔑 你正以「{{ accessPermLabel(activeGrant.grant.permission) }}」授权访问本文档，{{ grantExpireText(activeGrant) }}；到期或被撤销后访问权限将自动收回。</span>
       </div>
       <div class="page-head card">
         <div class="title-row">
@@ -144,6 +163,9 @@ watch(docId, () => { if (route.name === 'docDetail') { refresh(); showVersions.v
       </div>
 
       <ReviewPanel :doc="doc" />
+
+      <!-- 拥有者/管理员：审批访问申请、管理限时授权（撤销到期同步收回四处权限） -->
+      <AccessPanel v-if="isOwnerOrAdmin" :doc="doc" />
 
       <div class="comments card">
         <div class="c-title">评论与讨论（{{ comments.length }}）</div>
@@ -215,6 +237,7 @@ watch(docId, () => { if (route.name === 'docDetail') { refresh(); showVersions.v
 .c-input > div { flex: 1; }
 .versions a.at, .c-content :deep(a.at) { color: var(--primary); font-weight: 500; }
 .review-lock { padding: 10px 18px; margin-bottom: 14px; font-size: 13px; color: #b45309; background: #fffbeb; border-color: #f59e0b; }
+.grant-banner { padding: 10px 18px; margin-bottom: 14px; font-size: 13px; color: #6d28d9; background: #faf5ff; border-color: #a855f7; }
 .review-submitted-note { padding: 10px 20px; margin-bottom: 14px; display: flex; justify-content: space-between; align-items: center; gap: 12px; font-size: 13px; color: #15803d; background: #f0fdf4; border-color: #16a34a; }
 .vbadge { font-size: 11px; padding: 1px 8px; border-radius: 999px; }
 .vb-ok { background: #dcfce7; color: #15803d; }

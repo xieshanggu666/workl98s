@@ -4,6 +4,7 @@ import { useRoute, useRouter } from 'vue-router'
 import { useKbStore } from '@/stores/kb'
 import { useAuthStore } from '@/stores/auth'
 import { useReviewStore } from '@/stores/review'
+import { useAccessStore } from '@/stores/access'
 import { canViewDoc } from '@/utils/permission'
 import { tokenize, stripHtml, highlightTitle, highlightText, extractSnippet } from '@/utils/search'
 import { formatDate } from '@/utils/format'
@@ -13,6 +14,7 @@ const router = useRouter()
 const kb = useKbStore()
 const auth = useAuthStore()
 const reviewStore = useReviewStore()
+const accessStore = useAccessStore()
 
 const q = ref(route.query.q || '')
 const catFilter = ref('all')
@@ -29,7 +31,8 @@ async function run() {
 const results = computed(() => {
   const kw = tokenize(q.value)
   if (!kw.length) return []
-  let list = kb.docs.filter((d) => canViewDoc(d, auth.user?.id))
+  // 权限：撤销/到期的授权文档不再可被搜索命中
+  let list = kb.docs.filter((d) => canViewDoc(d, auth.user?.id, null, accessStore.grantOf(d.id, auth.user?.id)))
   const textById = {}
   list = list.map((d) => {
     const text = stripHtml(d.body)

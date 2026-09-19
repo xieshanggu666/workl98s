@@ -4,27 +4,33 @@ import { useRouter } from 'vue-router'
 import { useKbStore } from '@/stores/kb'
 import { useAuthStore } from '@/stores/auth'
 import { useEngagementStore } from '@/stores/engagement'
+import { useAccessStore } from '@/stores/access'
 import DocPill from '@/components/common/DocPill.vue'
 import { formatDate, avatarColor } from '@/utils/format'
-import { canEditContent } from '@/utils/permission'
+import { canEditContent, canViewDoc } from '@/utils/permission'
 
 const router = useRouter()
 const kb = useKbStore()
 const auth = useAuthStore()
 const engagement = useEngagementStore()
+const accessStore = useAccessStore()
 
 const docById = computed(() => Object.fromEntries(kb.docs.map((d) => [d.id, d])))
+// 仅保留当前用户可查看的文档（含有效限时授权；撤销/到期后从首页各列表收回）
+const visibleDocs = computed(() =>
+  kb.docs.filter((d) => canViewDoc(d, auth.user?.id, null, accessStore.grantOf(d.id, auth.user?.id)))
+)
 const stats = computed(() => ({
-  docs: kb.docs.length,
+  docs: visibleDocs.value.length,
   cats: kb.categories.length,
   tags: kb.tags.length,
   members: auth.users.length,
   comments: kb.comments.length
 }))
-const recents = computed(() => engagement.recentViews.map((r) => docById.value[r.docId]).filter(Boolean).slice(0, 6))
-const latest = computed(() => [...kb.docs].sort((a, b) => new Date(b.updatedAt) - new Date(a.updatedAt)).slice(0, 6))
-const collab = computed(() => kb.docs.filter((d) => (d.editors?.length || 0) > 1).sort((a, b) => new Date(b.updatedAt) - new Date(a.updatedAt)).slice(0, 6))
-const catOverview = computed(() => kb.categories.map((c) => ({ c, n: kb.docs.filter((d) => d.categoryId === c.id).length })))
+const recents = computed(() => engagement.recentViews.map((r) => docById.value[r.docId]).filter((d) => d && canViewDoc(d, auth.user?.id, null, accessStore.grantOf(d.id, auth.user?.id))).slice(0, 6))
+const latest = computed(() => [...visibleDocs.value].sort((a, b) => new Date(b.updatedAt) - new Date(a.updatedAt)).slice(0, 6))
+const collab = computed(() => visibleDocs.value.filter((d) => (d.editors?.length || 0) > 1).sort((a, b) => new Date(b.updatedAt) - new Date(a.updatedAt)).slice(0, 6))
+const catOverview = computed(() => kb.categories.map((c) => ({ c, n: visibleDocs.value.filter((d) => d.categoryId === c.id).length })))
 const canEdit = computed(() => canEditContent(auth.user?.role))
 </script>
 

@@ -3,6 +3,7 @@ import { ref, computed } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useKbStore } from '@/stores/kb'
 import { useAuthStore } from '@/stores/auth'
+import { useAccessStore } from '@/stores/access'
 import DocPill from '@/components/common/DocPill.vue'
 import { formatDate, avatarColor } from '@/utils/format'
 import { canEditContent, canViewDoc, roleLabel } from '@/utils/permission'
@@ -11,6 +12,7 @@ const route = useRoute()
 const router = useRouter()
 const kb = useKbStore()
 const auth = useAuthStore()
+const accessStore = useAccessStore()
 
 const viewMode = ref('cards') // cards | list
 
@@ -20,8 +22,8 @@ const filtered = computed(() => {
   const tag = route.query.tag
   if (cat && cat !== 'all') list = list.filter((d) => d.categoryId === cat)
   if (tag) list = list.filter((d) => (d.tagIds || []).includes(tag))
-  // 权限：只显示当前用户可查看的
-  list = list.filter((d) => canViewDoc(d, auth.user?.id))
+  // 权限：只显示当前用户可查看的（含有效期内的访问授权；撤销/到期后立即从列表消失）
+  list = list.filter((d) => canViewDoc(d, auth.user?.id, null, accessStore.grantOf(d.id, auth.user?.id)))
   // 排序：最近更新优先
   return [...list].sort((a, b) => new Date(b.updatedAt) - new Date(a.updatedAt))
 })

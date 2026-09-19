@@ -4,15 +4,17 @@ import { useRoute, useRouter } from 'vue-router'
 import { useKbStore } from '@/stores/kb'
 import { useAuthStore } from '@/stores/auth'
 import { useReviewStore } from '@/stores/review'
+import { useAccessStore } from '@/stores/access'
 import RichEditor from '@/components/doc/RichEditor.vue'
 import { docVersion, fieldLabels } from '@/utils/version'
-import { ROLE } from '@/utils/permission'
+import { canEditDoc, ROLE } from '@/utils/permission'
 
 const route = useRoute()
 const router = useRouter()
 const kb = useKbStore()
 const auth = useAuthStore()
 const reviewStore = useReviewStore()
+const accessStore = useAccessStore()
 
 const isEdit = computed(() => route.params.id && route.params.id !== 'new')
 const editingDoc = ref(null)
@@ -33,6 +35,10 @@ const reviewNote = ref('')
 // 文档当前是否处于评审中（非管理员进入时只读锁定）
 const lockedByReview = ref(false)
 const activeReview = ref(null)
+// 无编辑权限（非拥有者/协作成员，且无有效限时协作授权，或授权已撤销/到期）
+const accessDenied = ref(false)
+// 当前用户的有效限时授权（限时协作成员可编辑，但不能发起评审）
+const activeGrant = ref(null)
 // 乐观锁基线：打开编辑器时的版本号与字段快照，保存时据此检测并合并并发修改
 const baseVersion = ref(null)
 const baseDoc = ref(null)
@@ -118,6 +124,7 @@ async function submit(force = false) {
       }
       const res = await kb.updateDoc(route.params.id, payload, auth.user, '编辑文档', { baseVersion: baseVersion.value, base: baseDoc.value, force })
       if (!res || res.status === 'missing') { alert('文档不存在或已被删除'); return }
+      if (res.status === 'access-denied') { alert('你没有该文档的编辑权限：限时协作授权已被撤销或到期，编辑权限已收回。'); await load(); return }
       if (res.status === 'review-locked') { alert('该文档正在评审中，审批完成前无法保存修改。'); await load(); return }
       if (res.status === 'conflict') {
         // 保留未提交内容：内容留在编辑器中，同时写入备份
@@ -176,6 +183,16 @@ async function load() {
     const active = reviewStore.pendingReviewOf(route.params.id)
     activeReview.value = active
     lockedByReview.value = !!active && auth.user?.role !== ROLE.ADMIN
+    // 编辑权限：拥有者/固定协作成员/持有效限时协作授权；授权撤销或到期后进入即被收回
+    await accessStore.loadAll()
+    activeGrant.value = d ? accessStore.grantOf(d.id, auth.user?.id) : null
+    accessDenied.value = d
+      ? !canEditDoc(auth.user?.role, d, auth.user?.id, active, activeGrant.value)
+      : false
+    // 限时协作授权的只读成员没有「发起评审」通道，强制直接保存模式
+    if (activeGrant.value && auth.user?.role !== ROLE.ADMIN && auth.user?.role !== ROLE.EDITOR) {
+      submitMode.value = 'save'
+    }
     // 上次冲突时备份的未提交内容，重新进入编辑器时提示可恢复
     const b = localStorage.getItem(backupKey)
     if (b) { try { backup.value = JSON.parse(b) } catch { localStorage.removeItem(backupKey) } }
@@ -212,6 +229,14 @@ onBeforeUnmount(() => { clearTimeout(saveTimer.value); if (!isEdit.value) saveDr
 
 const canPublish = computed(() => title.value.trim() && categoryId.value)
 const userById = computed(() => Object.fromEntries(auth.users.map((u) => [u.id, u.name])))
+// 仅靠限时协作授权获得编辑资格的只读成员：可直接保存，不走角色专属的「发起评审」通道
+const isGrantOnly = computed(() => {
+  if (!editingDoc.value || !activeGrant.value) return false
+  if (auth.user?.role === ROLE.ADMIN || auth.user?.role === ROLE.EDITOR) return false
+  return editingDoc.value.ownerId !== auth.user?.id && !(editingDoc.value.editors || []).includes(auth.user?.id)
+})
+// 可编辑：未被评审锁定、未被授权收回
+const editableNow = computed(() => !lockedByReview.value && !accessDenied.value)
 </script>
 
 <template>
@@ -221,16 +246,28 @@ const userById = computed(() => Object.fromEntries(auth.users.map((u) => [u.id, 
       <span class="mode-badge">{{ isEdit ? '编辑文档' : '新建文档' }}</span>
       <span class="toast">{{ savedToast }}</span>
       <div class="spacer"></div>
-      <template v-if="isEdit && !lockedByReview">
-        <div class="mode-seg" title="直接保存立即生效；发起评审则由管理员审批通过后发布">
+      <template v-if="isEdit && !lockedByReview && !accessDenied">
+        <div class="mode-seg" v-if="!isGrantOnly" title="直接保存立即生效；发起评审则由管理员审批通过后发布">
           <button :class="{ on: submitMode === 'save' }" @click="submitMode = 'save'">直接保存</button>
           <button :class="{ on: submitMode === 'review' }" @click="submitMode = 'review'">发起评审</button>
         </div>
+        <span v-else class="grant-hint" title="限时协作授权：可直接编辑保存，审批发布由文档编辑者发起">🔑 限时协作授权中</span>
         <button class="btn" @click="manualSave">保存草稿</button>
         <button class="btn primary" :disabled="!canPublish || saving" @click="submit()">
           {{ saving ? '提交中…' : (submitMode === 'review' ? '提交评审' : isEdit ? '保存变更' : '发布文档') }}
         </button>
       </template>
+    </div>
+
+    <div v-if="accessDenied" class="card deny-bar">
+      <div class="lock-head">⛔ 你没有编辑该文档的权限</div>
+      <div class="lock-desc">
+        仅文档拥有者、协作成员或持有效「限时协作」授权的成员可编辑。
+        若授权已到期或被撤销，请前往文档详情页重新申请访问。
+      </div>
+      <div class="lock-actions">
+        <button class="btn sm primary" @click="router.push('/docs/' + route.params.id)">前往文档详情申请</button>
+      </div>
     </div>
 
     <div v-if="lockedByReview" class="card lock-bar">
@@ -265,7 +302,7 @@ const userById = computed(() => Object.fromEntries(auth.users.map((u) => [u.id, 
       </div>
     </div>
 
-    <div class="form card" :class="{ locked: lockedByReview }">
+    <div class="form card" :class="{ locked: lockedByReview || accessDenied }">
       <div class="field title-field">
         <input class="big-title" v-model="title" placeholder="文档标题…" maxlength="80" />
       </div>
@@ -295,15 +332,15 @@ const userById = computed(() => Object.fromEntries(auth.users.map((u) => [u.id, 
         </div>
       </div>
 
-      <div v-if="isEdit && submitMode === 'review' && !lockedByReview" class="field">
+      <div v-if="isEdit && submitMode === 'review' && !lockedByReview && !isGrantOnly" class="field">
         <label class="rv-label">评审说明</label>
         <textarea v-model="reviewNote" rows="2" placeholder="向管理员说明本次修改要点（会作为首条评审意见留痕，可选）"></textarea>
         <div class="rv-hint">提交后文档进入「评审中」并锁定当前正文，审批通过后以上内容与可见性才会生效。</div>
       </div>
     </div>
 
-    <div class="card editor-wrap" :class="{ locked: lockedByReview }">
-      <RichEditor v-model="body" :disabled="lockedByReview" @stats="stats = $event" />
+    <div class="card editor-wrap" :class="{ locked: lockedByReview || accessDenied }">
+      <RichEditor v-model="body" :disabled="lockedByReview || accessDenied" @stats="stats = $event" />
     </div>
     <div class="statline">正文 {{ stats.chars }} 字 · {{ stats.words }} 词 · 图片 {{ stats.imgs }} 张</div>
   </div>
@@ -346,5 +383,8 @@ const userById = computed(() => Object.fromEntries(auth.users.map((u) => [u.id, 
 .lock-head { font-weight: 600; color: #b45309; margin-bottom: 6px; }
 .lock-desc { font-size: 13px; color: var(--text-2); margin-bottom: 10px; }
 .lock-actions { display: flex; gap: 8px; }
+.deny-bar { border-color: var(--danger); background: #fff5f5; margin-bottom: 14px; }
+.deny-bar .lock-head { color: var(--danger); }
+.grant-hint { color: #9333ea; font-size: 12px; white-space: nowrap; }
 .form.locked, .editor-wrap.locked { opacity: 0.7; pointer-events: none; }
 </style>

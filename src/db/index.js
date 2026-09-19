@@ -29,6 +29,12 @@ export class KnowledgeDB extends Dexie {
     this.version(3).stores({
       gapTickets: 'id, status, createdBy, claimedBy, docId, reviewId, createdAt'
     })
+    // v4：文档访问申请
+    // - accessRequests：成员访问受限文档时申请限时阅读/协作权限（申请 → 拥有者审批 →
+    //   授权记录生效；撤销/到期收回详情、搜索、问答、编辑权限），授权快照与 timeline 随记录读写留痕
+    this.version(4).stores({
+      accessRequests: 'id, docId, applicantId, status, requestedPermission, createdAt, decidedAt, expiresAt, revokedAt'
+    })
   }
 }
 

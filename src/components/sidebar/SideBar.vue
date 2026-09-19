@@ -6,7 +6,8 @@ import { useAuthStore } from '@/stores/auth'
 import { useEngagementStore } from '@/stores/engagement'
 import { useReviewStore } from '@/stores/review'
 import { useGapStore } from '@/stores/gap'
-import { canEditContent, roleLabel } from '@/utils/permission'
+import { useAccessStore } from '@/stores/access'
+import { canEditContent, canViewDoc, roleLabel } from '@/utils/permission'
 import { avatarColor } from '@/utils/format'
 
 const route = useRoute()
@@ -16,8 +17,19 @@ const auth = useAuthStore()
 const engagement = useEngagementStore()
 const reviewStore = useReviewStore()
 const gapStore = useGapStore()
+const accessStore = useAccessStore()
+
+// 侧栏各文档列表统一过权限：授权撤销/到期后标题也不再从最近浏览/收藏/协作入口泄露
+function visible(d) {
+  return d && canViewDoc(d, auth.user?.id, null, accessStore.grantOf(d.id, auth.user?.id))
+}
 
 const docById = computed(() => Object.fromEntries(kb.docs.map((d) => [d.id, d])))
+
+// 待我审批的访问申请数（侧边栏角标）
+const accessPending = computed(() =>
+  accessStore.pendingForApprover(auth.user?.id, auth.user?.role, kb.docs).length
+)
 
 const catCounts = computed(() => {
   const m = {}
@@ -29,13 +41,13 @@ const activeCat = computed(() => route.query.cat || 'all')
 const activeTag = computed(() => route.query.tag || '')
 
 const recents = computed(() =>
-  engagement.recentViews.map((r) => docById.value[r.docId]).filter(Boolean).slice(0, 5)
+  engagement.recentViews.map((r) => docById.value[r.docId]).filter(visible).slice(0, 5)
 )
 const favDocs = computed(() =>
-  engagement.favorites.map((f) => docById.value[f.docId]).filter(Boolean)
+  engagement.favorites.map((f) => docById.value[f.docId]).filter(visible)
 )
 const collabDocs = computed(() =>
-  kb.docs.filter((d) => (d.editors?.length || 0) > 1).sort((a, b) => new Date(b.updatedAt) - new Date(a.updatedAt)).slice(0, 5)
+  kb.docs.filter((d) => visible(d) && (d.editors?.length || 0) > 1).sort((a, b) => new Date(b.updatedAt) - new Date(a.updatedAt)).slice(0, 5)
 )
 
 function go(path, query) {
@@ -57,6 +69,9 @@ function goDoc(id) {
       </div>
       <div class="link" :class="{ on: route.name === 'gapTickets' }" @click="go('/gaps', {})">
         📮 缺口工单<span v-if="gapStore.openCount" class="link-badge">{{ gapStore.openCount }}</span>
+      </div>
+      <div class="link" :class="{ on: route.name === 'accessCenter' }" @click="go('/access', {})">
+        🔑 访问授权<span v-if="accessPending" class="link-badge">{{ accessPending }}</span>
       </div>
       <div class="link" :class="{ on: route.name === 'profile' }" @click="go('/profile', {})">⚙️ 账号与权限</div>
     </nav>

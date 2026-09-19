@@ -89,6 +89,13 @@ const seedDocs = [
     visibility: 'team', ownerId: 'u-admin', editors: ['u-admin', 'u-chen'],
     createdAt: ago(18 * d), updatedAt: ago(7 * d),
     body: '<h2>密码与会话策略</h2><ul><li>强制启用两步验证</li><li>会话 14 天过期，支持强制下线</li><li>敏感操作需二次确认</li></ul><p>详见 <i>安全响应手册</i> 相关章节。</p>'
+  },
+  {
+    id: 'doc-9', title: '年度薪酬调整方案（保密）',
+    categoryId: 'c-product', tagIds: ['t-security'],
+    visibility: 'private', ownerId: 'u-admin', editors: ['u-admin'],
+    createdAt: ago(20 * d), updatedAt: ago(2 * d),
+    body: '<h2>调整原则</h2><p>本方案为保密材料，仅限拥有者与获授权成员访问，授权到期或撤销后自动收回阅读与协作权限。</p><ul><li>按绩效与市场分位综合评定</li><li>调整比例与预算挂钩</li><li>公示前严禁外传</li></ul>'
   }
 ]
 
@@ -284,8 +291,9 @@ function withReviewFields(doc) {
   }
 }
 
-// 种子版本：v1 基础数据；v2 缺口工单演示数据（含 rev-4 评审留痕与 doc-3 审批回写）
-const SEED_VER = '2'
+// 种子版本：v1 基础数据；v2 缺口工单演示数据（含 rev-4 评审留痕与 doc-3 审批回写）；
+// v3 文档访问申请演示数据（doc-9 保密文档上的限时阅读/协作授权、撤销与到期留痕）
+const SEED_VER = '3'
 
 async function isSeeded() {
   return (await getMeta('seeded')) === SEED_VER
@@ -315,9 +323,103 @@ async function ensureGapSeed() {
   await db.gapTickets.bulkAdd(seedGapTickets)
 }
 
+// ---- 文档访问申请演示数据（v3 增量种子）----
+// 在保密文档 doc-9 上覆盖完整链路：
+// acc-1 限时阅读（生效中，30 天）→ 可登录高晓叶查看详情/搜索/问答命中
+// acc-2 限时协作（生效中，7 天）→ 只读成员莫尘在授权期内可直接编辑该文档
+// acc-3 已驳回（高晓叶更早的一次协作申请被驳回）
+// acc-4 限时阅读（生效 1 天后被拥有者撤销）→ 撤销后权限即时收回，记录保留
+// acc-5 限时阅读（30 天，已到期）→ 到期惰性收回，timeline 补到期留痕
+const seedAccessRequests = [
+  {
+    id: 'acc-1', docId: 'doc-9', applicantId: 'u-xiaoye',
+    status: 'approved', requestedPermission: 'read',
+    reason: '需要对照薪酬结构梳理前端自助查询页面的字段，请开通短期阅读权限。',
+    createdAt: ago(2 * d),
+    decidedBy: 'u-admin', decidedAt: ago(2 * d - 2 * h), decisionNote: '仅用于页面字段核对，开通 30 天阅读。',
+    expiresAt: ago(-28 * d), revokedAt: null,
+    grant: { permission: 'read', grantedAt: ago(2 * d - 2 * h), expiresAt: ago(-28 * d), revokedAt: null },
+    timeline: [
+      { action: 'apply', by: 'u-xiaoye', at: ago(2 * d), note: '需要对照薪酬结构梳理前端自助查询页面的字段，请开通短期阅读权限。' },
+      { action: 'approve', by: 'u-admin', at: ago(2 * d - 2 * h), note: '授权限时阅读，有效期 30 天：仅用于页面字段核对，开通 30 天阅读。' }
+    ]
+  },
+  {
+    id: 'acc-2', docId: 'doc-9', applicantId: 'u-mochen',
+    status: 'approved', requestedPermission: 'collab',
+    reason: '方案中的保密标识视觉样式需要我配合调整，申请协作权限。',
+    createdAt: ago(30 * h),
+    decidedBy: 'u-admin', decidedAt: ago(28 * h), decisionNote: '仅调整保密标识样式，开通 7 天协作。',
+    expiresAt: ago(-6 * d + 28 * h), revokedAt: null,
+    grant: { permission: 'collab', grantedAt: ago(28 * h), expiresAt: ago(-6 * d + 28 * h), revokedAt: null },
+    timeline: [
+      { action: 'apply', by: 'u-mochen', at: ago(30 * h), note: '方案中的保密标识视觉样式需要我配合调整，申请协作权限。' },
+      { action: 'approve', by: 'u-admin', at: ago(28 * h), note: '授权限时协作，有效期 7 天：仅调整保密标识样式，开通 7 天协作。' }
+    ]
+  },
+  {
+    id: 'acc-3', docId: 'doc-9', applicantId: 'u-xiaoye',
+    status: 'rejected', requestedPermission: 'collab',
+    reason: '希望直接补充页面交互说明。',
+    createdAt: ago(10 * d),
+    decidedBy: 'u-admin', decidedAt: ago(9 * d), decisionNote: '薪酬方案不开放协作编辑，字段核对可重新申请只读权限。',
+    grant: null,
+    timeline: [
+      { action: 'apply', by: 'u-xiaoye', at: ago(10 * d), note: '希望直接补充页面交互说明。' },
+      { action: 'reject', by: 'u-admin', at: ago(9 * d), note: '薪酬方案不开放协作编辑，字段核对可重新申请只读权限。' }
+    ]
+  },
+  {
+    id: 'acc-4', docId: 'doc-9', applicantId: 'u-ziwei',
+    status: 'revoked', requestedPermission: 'read',
+    reason: '核对产品侧预算口径。',
+    createdAt: ago(8 * d),
+    decidedBy: 'u-admin', decidedAt: ago(8 * d - 3 * h), decisionNote: '开通 1 天阅读。',
+    expiresAt: ago(7 * d - 3 * h), revokedAt: ago(7 * d),
+    grant: { permission: 'read', grantedAt: ago(8 * d - 3 * h), expiresAt: ago(7 * d - 3 * h), revokedAt: ago(7 * d) },
+    timeline: [
+      { action: 'apply', by: 'u-ziwei', at: ago(8 * d), note: '核对产品侧预算口径。' },
+      { action: 'approve', by: 'u-admin', at: ago(8 * d - 3 * h), note: '授权限时阅读，有效期 1 天：开通 1 天阅读。' },
+      { action: 'revoke', by: 'u-admin', at: ago(7 * d), note: '预算口径调整，提前收回阅读权限。' }
+    ]
+  },
+  {
+    id: 'acc-5', docId: 'doc-9', applicantId: 'u-chen',
+    status: 'approved', requestedPermission: 'read',
+    reason: '评估调薪数据对服务端存储与加密的要求。',
+    createdAt: ago(40 * d),
+    decidedBy: 'u-admin', decidedAt: ago(39 * d), decisionNote: '开通 30 天阅读。',
+    expiresAt: ago(9 * d), revokedAt: null,
+    grant: { permission: 'read', grantedAt: ago(39 * d), expiresAt: ago(9 * d), revokedAt: null },
+    timeline: [
+      { action: 'apply', by: 'u-chen', at: ago(40 * d), note: '评估调薪数据对服务端存储与加密的要求。' },
+      { action: 'approve', by: 'u-admin', at: ago(39 * d), note: '授权限时阅读，有效期 30 天：开通 30 天阅读。' },
+      { action: 'expire', by: 'system', at: ago(9 * d), note: '授权到期，阅读与协作权限已自动收回' }
+    ]
+  },
+  // doc-7 私有组件文档：一条待审批申请，登录拥有者高晓叶或管理员可在访问授权中心审批
+  {
+    id: 'acc-6', docId: 'doc-7', applicantId: 'u-mochen',
+    status: 'pending', requestedPermission: 'read',
+    reason: '设计组件库时想参考你文档里的展示型/容器型拆分约定，申请 7 天阅读。',
+    createdAt: ago(4 * h),
+    decidedBy: null, decidedAt: null, decisionNote: '',
+    grant: null,
+    timeline: [
+      { action: 'apply', by: 'u-mochen', at: ago(4 * h), note: '设计组件库时想参考你文档里的展示型/容器型拆分约定，申请 7 天阅读。' }
+    ]
+  }
+]
+
+// v3 增量种子：访问申请与授权记录。老库升级时补充，全新安装在基础种子后顺带执行
+async function ensureAccessSeed() {
+  if ((await db.accessRequests.count()) > 0) return
+  await db.accessRequests.bulkAdd(seedAccessRequests)
+}
+
 export async function ensureSeeded() {
   if (await isSeeded()) return
-  await db.transaction('rw', db.users, db.categories, db.tags, db.docs, db.comments, db.shares, db.favorites, db.ratings, db.reviews, db.gapTickets, async () => {
+  await db.transaction('rw', db.users, db.categories, db.tags, db.docs, db.comments, db.shares, db.favorites, db.ratings, db.reviews, db.gapTickets, db.accessRequests, async () => {
     if ((await db.users.count()) === 0) {
       await db.users.bulkAdd(seedUsers)
       await db.categories.bulkAdd(seedCategories)
@@ -330,6 +432,7 @@ export async function ensureSeeded() {
       await db.reviews.bulkAdd(seedReviews)
     }
     await ensureGapSeed()
+    await ensureAccessSeed()
   })
   await setMeta('seeded', SEED_VER)
 }
