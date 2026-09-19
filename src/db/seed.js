@@ -284,8 +284,60 @@ function withReviewFields(doc) {
   }
 }
 
-// 种子版本：v1 基础数据；v2 缺口工单演示数据（含 rev-4 评审留痕与 doc-3 审批回写）
-const SEED_VER = '2'
+// ---- 访问申请演示数据（v3 增量种子）----
+// 均指向私有文档 doc-7（所有者 u-xiaoye），覆盖完整生命周期：
+// acc-1 待审批 / acc-2 授权中（未到期）/ acc-3 已过期（加载时由 sweepExpired 落库为已到期）/ acc-4 已撤销
+const seedAccessRequests = [
+  {
+    id: 'acc-1', docId: 'doc-7', requesterId: 'u-mochen',
+    requestType: 'collab', reason: '设计稿需要引用组件规范，申请协作补充交互说明。',
+    durationDays: 3, status: 'pending',
+    requestedAt: ago(2 * h),
+    decidedBy: null, decidedAt: null, decisionNote: '', expiresAt: null,
+    timeline: [{ action: 'apply', by: 'u-mochen', at: ago(2 * h), note: '设计稿需要引用组件规范，申请协作补充交互说明。' }]
+  },
+  {
+    id: 'acc-2', docId: 'doc-7', requesterId: 'u-ziwei',
+    requestType: 'read', reason: '撰写组件相关 PRD 前需要阅读规范。',
+    durationDays: 7, status: 'approved',
+    requestedAt: ago(1 * d),
+    decidedBy: 'u-xiaoye', decidedAt: ago(20 * h), decisionNote: '产品评审期间需要，同意。',
+    expiresAt: new Date(now - 20 * h + 7 * d).toISOString(),
+    timeline: [
+      { action: 'apply', by: 'u-ziwei', at: ago(1 * d), note: '撰写组件相关 PRD 前需要阅读规范。' },
+      { action: 'approve', by: 'u-xiaoye', at: ago(20 * h), note: '产品评审期间需要，同意。' }
+    ]
+  },
+  {
+    id: 'acc-3', docId: 'doc-7', requesterId: 'u-chen',
+    requestType: 'read', reason: '排查组件复用问题，临时查阅。',
+    durationDays: 1, status: 'approved',
+    requestedAt: ago(3 * d),
+    decidedBy: 'u-xiaoye', decidedAt: ago(2 * d), decisionNote: '临时查阅，授权 1 天。',
+    expiresAt: new Date(now - 2 * d + 1 * d).toISOString(),
+    timeline: [
+      { action: 'apply', by: 'u-chen', at: ago(3 * d), note: '排查组件复用问题，临时查阅。' },
+      { action: 'approve', by: 'u-xiaoye', at: ago(2 * d), note: '临时查阅，授权 1 天。' }
+    ]
+  },
+  {
+    id: 'acc-4', docId: 'doc-7', requesterId: 'u-admin',
+    requestType: 'collab', reason: '统一梳理组件文档结构，申请协作编辑。',
+    durationDays: 7, status: 'revoked',
+    requestedAt: ago(5 * d),
+    decidedBy: 'u-xiaoye', decidedAt: ago(4 * d), decisionNote: '同意，注意保持目录结构。',
+    expiresAt: new Date(now - 4 * d + 7 * d).toISOString(),
+    revokedAt: ago(1 * d),
+    timeline: [
+      { action: 'apply', by: 'u-admin', at: ago(5 * d), note: '统一梳理组件文档结构，申请协作编辑。' },
+      { action: 'approve', by: 'u-xiaoye', at: ago(4 * d), note: '同意，注意保持目录结构。' },
+      { action: 'revoke', by: 'u-xiaoye', at: ago(1 * d), note: '规范调整期间暂缓外部协作，提前收回。' }
+    ]
+  }
+]
+
+// 种子版本：v1 基础数据；v2 缺口工单演示数据（含 rev-4 评审留痕与 doc-3 审批回写）；v3 访问申请演示数据
+const SEED_VER = '3'
 
 async function isSeeded() {
   return (await getMeta('seeded')) === SEED_VER
@@ -315,9 +367,15 @@ async function ensureGapSeed() {
   await db.gapTickets.bulkAdd(seedGapTickets)
 }
 
+// v3 增量种子：访问申请演示数据（含待审批/授权中/已过期/已撤销各状态）
+async function ensureAccessSeed() {
+  if ((await db.accessRequests.count()) > 0) return
+  await db.accessRequests.bulkAdd(seedAccessRequests)
+}
+
 export async function ensureSeeded() {
   if (await isSeeded()) return
-  await db.transaction('rw', db.users, db.categories, db.tags, db.docs, db.comments, db.shares, db.favorites, db.ratings, db.reviews, db.gapTickets, async () => {
+  await db.transaction('rw', db.users, db.categories, db.tags, db.docs, db.comments, db.shares, db.favorites, db.ratings, db.reviews, db.gapTickets, db.accessRequests, async () => {
     if ((await db.users.count()) === 0) {
       await db.users.bulkAdd(seedUsers)
       await db.categories.bulkAdd(seedCategories)
@@ -330,6 +388,7 @@ export async function ensureSeeded() {
       await db.reviews.bulkAdd(seedReviews)
     }
     await ensureGapSeed()
+    await ensureAccessSeed()
   })
   await setMeta('seeded', SEED_VER)
 }

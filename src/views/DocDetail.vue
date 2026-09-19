@@ -5,13 +5,17 @@ import { useKbStore } from '@/stores/kb'
 import { useAuthStore } from '@/stores/auth'
 import { useEngagementStore } from '@/stores/engagement'
 import { useReviewStore } from '@/stores/review'
+import { useAccessStore } from '@/stores/access'
 import DocPill from '@/components/common/DocPill.vue'
 import MemberSelect from '@/components/common/MemberSelect.vue'
 import ShareDialog from '@/components/doc/ShareDialog.vue'
 import ReviewPanel from '@/components/doc/ReviewPanel.vue'
+import AccessPanel from '@/components/doc/AccessPanel.vue'
+import AccessRequestDialog from '@/components/doc/AccessRequestDialog.vue'
 import { formatFull, formatDate, avatarColor } from '@/utils/format'
-import { canEditDoc, canViewDoc } from '@/utils/permission'
+import { canEditDoc, canViewDoc, canDeleteDoc } from '@/utils/permission'
 import { versionReviewBadge } from '@/utils/review'
+import { canRequestAccess, effectiveStatus, accessStatusLabel, grantTypeLabel, remainingLabel } from '@/utils/access'
 
 const route = useRoute()
 const router = useRouter()
@@ -19,6 +23,7 @@ const kb = useKbStore()
 const auth = useAuthStore()
 const engagement = useEngagementStore()
 const reviewStore = useReviewStore()
+const accessStore = useAccessStore()
 
 const doc = ref(null)
 const notFound = ref(false)
@@ -27,6 +32,7 @@ const commentText = ref('')
 const commentMentions = ref([])
 const showVersions = ref(false)
 const shareOpen = ref(false)
+const accessOpen = ref(false)
 // 保存时自动合并了其他窗口修改的提示（由编辑器跳转携带）
 const mergeNotice = ref('')
 // 已提交评审的提示（由编辑器「提交评审」跳转携带）
@@ -36,24 +42,36 @@ const docId = computed(() => route.params.id)
 // 兼容旧数据：早期文档可能没有 versions 字段
 const versionList = computed(() => (doc.value?.versions?.length ? doc.value.versions : []))
 
+// 当前用户对该文档的有效访问授权（阅读/协作）；撤销或到期后为 null，各访问面同步收回
+const activeGrant = computed(() => (docId.value ? accessStore.activeGrantFor(docId.value, auth.user?.id) : null))
+// 受限访问时展示的最新一条申请进度
+const myLatestRequest = computed(() => (docId.value ? accessStore.latestRequestOf(docId.value, auth.user?.id) : null))
+
 async function refresh() {
   if (!docId.value) return
-  await reviewStore.loadAll()
+  await Promise.all([reviewStore.loadAll(), accessStore.loadAll()])
   const d = await kb.getDoc(docId.value)
   if (!d) { notFound.value = true; return }
-  if (!canViewDoc(d, auth.user?.id)) { notAllowed.value = true; return }
+  if (!canViewDoc(d, auth.user?.id, null, accessStore.activeGrantFor(d.id, auth.user?.id))) { notAllowed.value = true; return }
+  notAllowed.value = false
   doc.value = d
   await engagement.recordView(auth.user?.id, d.id)
   await engagement.refresh(auth.user?.id)
 }
 
-const canEdit = computed(() => canEditDoc(auth.user?.role, doc.value, auth.user?.id, pendingReview.value))
+const canEdit = computed(() => canEditDoc(auth.user?.role, doc.value, auth.user?.id, pendingReview.value, activeGrant.value))
+// 删除不随访问授权放开：仅角色可编辑的拥有者/协作成员
+const canDelete = computed(() => canDeleteDoc(auth.user?.role, doc.value, auth.user?.id))
 const isFav = computed(() => engagement.isFavorite(docId.value))
 const comments = computed(() => (doc.value ? kb.commentsOf(doc.value.id) : []))
 const userById = computed(() => Object.fromEntries(auth.users.map((u) => [u.id, u])))
 const pendingReview = computed(() => (doc.value ? reviewStore.pendingReviewOf(doc.value.id) : null))
 // 文档锁定提示：评审中正文保持旧版，编辑入口（非管理员）不可用
 const reviewLocked = computed(() => !!pendingReview.value && auth.user?.role !== 'admin')
+// 受限文档可申请访问（私有、非所有者/协作成员、已登录）
+const canRequest = computed(() => canRequestAccess(doc.value, auth.user?.id))
+// 授权被撤销/到期后，内存中的文档快照同步失效（权限以授权记录实时状态为准）
+watch(activeGrant, (g) => { if (!g && doc.value && doc.value.visibility === 'private' && !canViewDoc(doc.value, auth.user?.id)) { doc.value = null; notAllowed.value = true } })
 
 async function doDelete() {
   if (!confirm('确定删除该文档？此操作不可恢复。')) return
@@ -89,9 +107,24 @@ watch(docId, () => { if (route.name === 'docDetail') { refresh(); showVersions.v
 <template>
   <div class="detail">
     <div v-if="notFound" class="empty"><div class="ico">❔</div>文档不存在或已被删除</div>
-    <div v-else-if="notAllowed" class="empty"><div class="ico">🔒</div>该文档为私有，你没有查看权限</div>
+    <div v-else-if="notAllowed" class="empty card denied">
+      <div class="ico">🔒</div>
+      <p>该文档为私有，你没有查看权限</p>
+      <template v-if="myLatestRequest">
+        <p class="req-state">
+          你的{{ grantTypeLabel(myLatestRequest.requestType) }}申请（{{ myLatestRequest.durationDays }} 天）当前状态：
+          <b>{{ accessStatusLabel(effectiveStatus(myLatestRequest)) }}</b>
+        </p>
+        <button v-if="canRequest && ['rejected', 'revoked', 'expired', 'canceled'].includes(effectiveStatus(myLatestRequest))" class="btn primary" @click="accessOpen = true">重新申请访问</button>
+      </template>
+      <button v-else-if="canRequest" class="btn primary" @click="accessOpen = true">🔐 申请访问权限</button>
+      <p class="denied-tip">可申请限时阅读或协作权限，由文档所有者审批；授权到期或被撤销后访问自动收回。</p>
+    </div>
 
     <template v-else-if="doc">
+      <div v-if="activeGrant" class="card grant-note">
+        <span>⏳ 你正在通过限时授权访问本文档（{{ grantTypeLabel(activeGrant.requestType) }}），{{ remainingLabel(activeGrant.expiresAt) }}；到期或被所有者撤销后，详情、搜索、问答与编辑权限将同步收回。</span>
+      </div>
       <div v-if="mergeNotice" class="card merge-note">
         <span>ℹ️ 保存时已自动合并其他窗口对「{{ mergeNotice }}」的修改，双方内容均已保留</span>
         <button class="btn sm ghost" @click="mergeNotice = ''">知道了</button>
@@ -111,7 +144,7 @@ watch(docId, () => { if (route.name === 'docDetail') { refresh(); showVersions.v
             <button class="btn" @click="shareOpen = true">🔗 分享</button>
             <button v-if="canEdit" class="btn" @click="router.push('/docs/' + doc.id + '/edit')">✎ 编辑</button>
             <button v-else-if="reviewLocked" class="btn" disabled title="评审中，请等待管理员审批">🔒 评审中</button>
-            <button v-if="canEdit" class="btn danger" @click="doDelete">🗑 删除</button>
+            <button v-if="canDelete" class="btn danger" @click="doDelete">🗑 删除</button>
           </div>
         </div>
         <div class="meta-row">
@@ -145,6 +178,8 @@ watch(docId, () => { if (route.name === 'docDetail') { refresh(); showVersions.v
 
       <ReviewPanel :doc="doc" />
 
+      <AccessPanel :doc="doc" />
+
       <div class="comments card">
         <div class="c-title">评论与讨论（{{ comments.length }}）</div>
         <div v-if="!comments.length" class="c-empty">暂无评论，成为第一个讨论者吧</div>
@@ -164,11 +199,19 @@ watch(docId, () => { if (route.name === 'docDetail') { refresh(); showVersions.v
 
       <ShareDialog :open="shareOpen" :doc="doc" @close="shareOpen = false" />
     </template>
+
+    <AccessRequestDialog :open="accessOpen" :doc="kb.docs.find((d) => d.id === docId) || doc" @close="accessOpen = false" @submitted="refresh" />
   </div>
 </template>
 
 <style scoped>
 .detail { max-width: 860px; margin: 0 auto; }
+.denied { padding: 48px 24px; }
+.denied p { margin: 6px 0; }
+.denied .btn { margin-top: 10px; }
+.req-state { color: var(--text-2); font-size: 13px; }
+.denied-tip { color: var(--text-3); font-size: 12px; max-width: 420px; margin: 10px auto 0; }
+.grant-note { padding: 10px 20px; margin-bottom: 14px; font-size: 13px; color: #b45309; background: #fffbeb; border-color: #f59e0b; }
 .merge-note { padding: 10px 20px; margin-bottom: 14px; display: flex; justify-content: space-between; align-items: center; gap: 12px; font-size: 13px; color: var(--primary); border-color: var(--primary); background: var(--primary-weak); }
 .page-head { padding: 20px 24px; }
 .title-row { display: flex; justify-content: space-between; align-items: center; gap: 16px; flex-wrap: wrap; }

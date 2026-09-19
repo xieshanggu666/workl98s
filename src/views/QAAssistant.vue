@@ -4,6 +4,7 @@ import { useRoute, useRouter } from 'vue-router'
 import { useKbStore } from '@/stores/kb'
 import { useAuthStore } from '@/stores/auth'
 import { useGapStore } from '@/stores/gap'
+import { useAccessStore } from '@/stores/access'
 import { canViewDoc } from '@/utils/permission'
 import { extractKeywords, scoreDoc } from '@/utils/qa'
 import { gapStatusLabel } from '@/utils/gap'
@@ -15,6 +16,7 @@ const router = useRouter()
 const kb = useKbStore()
 const auth = useAuthStore()
 const gapStore = useGapStore()
+const accessStore = useAccessStore()
 
 const question = ref('')
 const asked = ref('')
@@ -65,7 +67,7 @@ function answering() {
   setTimeout(() => {
     const keywords = extractKeywords(asked.value)
     const tagNames = kb.tags
-    const hits = kb.docs.filter((d) => canViewDoc(d, auth.user?.id)).map((d) => ({
+    const hits = kb.docs.filter((d) => canViewDoc(d, auth.user?.id, null, accessStore.activeGrantFor(d.id, auth.user?.id))).map((d) => ({
       doc: d,
       bodyText: stripHtml(d.body),
       score: scoreDoc(d, keywords, tagNames, stripHtml(d.body))

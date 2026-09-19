@@ -6,7 +6,9 @@ import { useAuthStore } from '@/stores/auth'
 import { useEngagementStore } from '@/stores/engagement'
 import { useReviewStore } from '@/stores/review'
 import { useGapStore } from '@/stores/gap'
+import { useAccessStore } from '@/stores/access'
 import { canEditContent, roleLabel } from '@/utils/permission'
+import { ACCESS, canDecideRequest } from '@/utils/access'
 import { avatarColor } from '@/utils/format'
 
 const route = useRoute()
@@ -16,8 +18,16 @@ const auth = useAuthStore()
 const engagement = useEngagementStore()
 const reviewStore = useReviewStore()
 const gapStore = useGapStore()
+const accessStore = useAccessStore()
 
 const docById = computed(() => Object.fromEntries(kb.docs.map((d) => [d.id, d])))
+
+// 待我审批的访问申请数（本人所有文档的申请；管理员可见全部）
+const accessPendingCount = computed(() =>
+  accessStore.requests.filter((r) =>
+    r.status === ACCESS.PENDING && canDecideRequest(r, docById.value[r.docId], auth.user?.id, auth.user?.role)
+  ).length
+)
 
 const catCounts = computed(() => {
   const m = {}
@@ -57,6 +67,9 @@ function goDoc(id) {
       </div>
       <div class="link" :class="{ on: route.name === 'gapTickets' }" @click="go('/gaps', {})">
         📮 缺口工单<span v-if="gapStore.openCount" class="link-badge">{{ gapStore.openCount }}</span>
+      </div>
+      <div class="link" :class="{ on: route.name === 'accessRequests' }" @click="go('/access', {})">
+        🔐 访问申请<span v-if="accessPendingCount" class="link-badge">{{ accessPendingCount }}</span>
       </div>
       <div class="link" :class="{ on: route.name === 'profile' }" @click="go('/profile', {})">⚙️ 账号与权限</div>
     </nav>

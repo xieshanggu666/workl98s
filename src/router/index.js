@@ -1,6 +1,8 @@
 import { createRouter, createWebHashHistory } from 'vue-router'
 import { useAuthStore } from '@/stores/auth'
+import { useAccessStore } from '@/stores/access'
 import { canEditContent } from '@/utils/permission'
+import { isCollabGrant } from '@/utils/access'
 
 const routes = [
   { path: '/', name: 'dashboard', component: () => import('@/views/Dashboard.vue'), meta: { title: '首页' } },
@@ -11,6 +13,7 @@ const routes = [
   { path: '/search', name: 'search', component: () => import('@/views/SearchResults.vue'), meta: { title: '搜索' } },
   { path: '/reviews', name: 'reviewCenter', component: () => import('@/views/ReviewCenter.vue'), meta: { title: '评审中心' } },
   { path: '/gaps', name: 'gapTickets', component: () => import('@/views/GapTickets.vue'), meta: { title: '缺口工单' } },
+  { path: '/access', name: 'accessRequests', component: () => import('@/views/AccessRequests.vue'), meta: { title: '访问申请' } },
   { path: '/qa', name: 'qa', component: () => import('@/views/QAAssistant.vue'), meta: { title: '智能问答' } },
   { path: '/share/:token', name: 'share', component: () => import('@/views/ShareView.vue'), meta: { title: '共享文档' } },
   { path: '/profile', name: 'profile', component: () => import('@/views/ProfileSettings.vue'), meta: { title: '账号与权限' } },
@@ -31,8 +34,12 @@ router.beforeEach((to) => {
   if (to.meta.requiresEdit) {
     const role = auth.user?.role || 'viewer'
     if (!canEditContent(role)) {
-      // 无编辑权限：跳回文档库并提示
-      return { name: 'docList', query: { denied: '1' } }
+      // 无编辑权限角色：持有该文档有效协作授权的成员放行（授权撤销/到期后同样被拦截）
+      const access = useAccessStore()
+      const grant = to.params.id ? access.activeGrantFor(to.params.id, auth.user?.id) : null
+      if (!isCollabGrant(grant)) {
+        return { name: 'docList', query: { denied: '1' } }
+      }
     }
   }
   return true
